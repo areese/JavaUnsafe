@@ -67,8 +67,8 @@ dependencies {
 publishing {
     publications {
         mavenJava(MavenPublication) {
-            groupId 'com.yahoo.example.codegen'
-            artifactId 'codegen'
+            groupId 'com.yahoo.areese'
+            artifactId 'javaunsafe'
             version '1.0.0'
 
             from components.java

@@ -17,7 +17,7 @@ JAVA_HOME?=/usr/java/default
 JAVA_OS=linux
 LINUX_ADD=amd64/
 EXT=so
-CC=gcc
+CC=g++
 TARGET_ARCH=x86_64-linux-gcc
 endif
 

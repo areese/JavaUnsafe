@@ -1,7 +1,5 @@
 package com.yahoo.wildwest;
 
-import com.yahoo.example.testutf8.JniLibraryLoader;
-
 class PowersawValidator {
     static {
         JniLibraryLoader.load();

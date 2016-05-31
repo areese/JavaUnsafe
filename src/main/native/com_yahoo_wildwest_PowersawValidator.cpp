@@ -35,6 +35,10 @@ int checkAddress(const char *expected, int ai_family, const ipv6_sockaddr *addr,
         addr_s = (const void*) &(ipv6->sin6_addr);
     }
 
+    if (LINUX_AF_INET6 == ai_family) {
+        ai_family=AF_INET6;
+    }
+
     if (NULL == inet_ntop(ai_family, addr_s, ipstr, sizeof(ipstr))) {
         return -3;
     }

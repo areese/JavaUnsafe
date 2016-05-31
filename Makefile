@@ -42,7 +42,7 @@ LIBNAME=libtestutf8.$(EXT)
 all: check $(LIBNAME)
 
 check:
-	echo $JAVA_HOME
+	echo $(JAVA_HOME)
 	uname -a
 	uname -s 
 

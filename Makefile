@@ -34,7 +34,7 @@ OBJECTS=$(SOURCES:$(SOURCES_DIR)/%.cpp=$(OBJECTS_DIR)/%.o)
 JAVA_LIBRARY_PATH=$(JAVA_HOME)/jre/lib/$(LINUX_ADD)server/
 JAVA_INCLUDES=-I$(JAVA_HOME)/include/ -I$(JAVA_HOME)/include/$(JAVA_OS)/ -L$(JAVA_LIBRARY_PATH)
 
-CXXFLAGS=$(JAVA_INCLUDES) -I$(SOURCES_DIR)  -g -fPIC -lstdc++
+CXXFLAGS=$(JAVA_INCLUDES) -I$(SOURCES_DIR)  -g -fPIC -lstdc++ -shared -Wl,--gc-sections
 LFLAGS = -Wall -lpthread -shared  -lstdc++
 
 LIBNAME=libtestutf8.$(EXT)

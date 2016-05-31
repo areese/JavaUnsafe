@@ -7,6 +7,7 @@ apply plugin: 'eclipse'
 //apply plugin: 'me.champeau.gradle:jmh-gradle-plugin:0.3.0'
 
 repositories {
+        jcenter()
     mavenCentral()
 }
 
@@ -55,6 +56,7 @@ build.dependsOn(buildJni)
 test.dependsOn(buildJni)
 
 dependencies {
+    classpath 'com.jfrog.bintray.gradle:gradle-bintray-plugin:1.0'
     testCompile group: 'org.testng', name: 'testng', version: '6.8.5'
     runtime group: 'log4j', name: 'log4j', version: '1.2.14'
     testCompile group: 'org.mockito', name: 'mockito-all', version: '1.7'
@@ -73,8 +75,44 @@ publishing {
 
             from components.java
 
+
             artifact sourcesJar {
                 classifier "sources"
+            }
+
+            artifact javadocJar {
+                classifier "javadoc"
+            }
+        }
+    }
+}
+
+
+bintray {
+    user = bintray_user //this usually comes from gradle.properties file in ~/.gradle
+    key = bintray_api_key //this usually comes from gradle.properties file in ~/.gradle
+    publications = ['mavenJava'] //When uploading Maven-based publication files
+    dryRun = true //Whether to run this as dry-run, without deploying
+    publish = true //If version should be auto published after an upload
+    pkg {
+        repo = ''
+        userOrg = 'yahoo' //An optional organization name when the repo belongs to one of the user's orgs
+        name = 'java-unsafe'
+        desc = 'Complete madness!'
+        websiteUrl = 'https://github.com/areese/JavaUnsafe'
+        issueTrackerUrl = 'https://github.com/bintray/areese/JavaUnsafe/issues'
+        vcsUrl = 'https://github.com/areese/JavaUnsafe.git'
+        licenses = ['Apache-2.0']
+        publicDownloadNumbers = true
+        version {
+            name = project.version //Bintray logical version name
+            desc = 'optional, version-specific description'
+
+            mavenCentralSync {
+                sync = false //Optional (true by default). Determines whether to sync the version to Maven Central.
+                user = 'userToken' //OSS user token
+                password = 'paasword' //OSS user password
+                close = '1' //Optional property. By default the staging repository is closed and artifacts are released to Maven Central. You can optionally turn this behaviour off (by puting 0 as value) and release the version manually.
             }
         }
     }

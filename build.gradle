@@ -99,7 +99,7 @@ bintray {
     dryRun = true //Whether to run this as dry-run, without deploying
     publish = true //If version should be auto published after an upload
     pkg {
-        repo = ''
+        repo = 'yahoo/maven/java-unsafe'
         userOrg = 'yahoo' //An optional organization name when the repo belongs to one of the user's orgs
         name = 'java-unsafe'
         desc = 'Complete madness!'

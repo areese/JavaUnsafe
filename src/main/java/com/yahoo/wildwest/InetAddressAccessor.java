@@ -11,6 +11,7 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.channels.UnsupportedAddressTypeException;
+import java.util.Arrays;
 import java.util.Objects;
 
 @SuppressWarnings("restriction")
@@ -228,7 +229,9 @@ public class InetAddressAccessor {
      * </pre>
      */
     public static final byte AF_INET = 2;
-    public static final byte AF_INET6 = 10;
+    public static final byte LINUX_AF_INET6 = 10;
+    public static final byte OSX_AF_INET6 = 30;
+    public static final byte AF_INET6 = LINUX_AF_INET6;
 
     /**
      * Given an InetAddress[], get the bytes and store them in an unsafe allocated address. Format is: AF_FAMILY, bytes.
@@ -376,7 +379,7 @@ public class InetAddressAccessor {
 
         byte[] allTheBytes = new byte[(int) length];
         MUnsafe.copyMemory(allTheBytes, address, length);
-        
+
         if (totalLength < 6 || 0 == totalAddresses) {
             return new InetAddress[] {};
         }
@@ -393,7 +396,8 @@ public class InetAddressAccessor {
             } else if (AF_INET6 == type) {
                 len = 16;
             } else {
-                throw new UnknownHostException("Unknown type " + type + " found");
+                throw new UnknownHostException("At index " + i + " Unknown type " + type + " found in bytes: "
+                                + Arrays.toString(allTheBytes));
             }
 
             bytes = new byte[len];

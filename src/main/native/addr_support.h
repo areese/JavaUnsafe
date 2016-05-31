@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define LINUX_AF_INET6 10
+
 class ScopedAddrInfo {
 public:
     ScopedAddrInfo(addrinfo *memory) :
@@ -178,9 +180,11 @@ inline int allocAddrInfo(ScopedAddrInfo &addrInfo, long unsafeAddress,
         pointer++;
         currentOffest++;
 
-        if ((AF_INET != type && AF_INET6 != type)
+        if ((AF_INET != type && AF_INET6 != type && LINUX_AF_INET6  != type)
                 || (AF_INET == type && currentOffest + 4 > length)
-                || (AF_INET6 == type && currentOffest + 16 > length)) {
+                || (AF_INET6 == type && currentOffest + 16 > length)
+                || (LINUX_AF_INET6 == type && currentOffest + 16 > length)
+                ) {
             break;
         }
 
@@ -193,7 +197,7 @@ inline int allocAddrInfo(ScopedAddrInfo &addrInfo, long unsafeAddress,
             unsafeToSockAddr(*storage, unsafeAddress + currentOffest, 4);
             currentOffest += 4;
             pointer += 4;
-        } else if (AF_INET6 == type) {
+        } else if (AF_INET6 == type || LINUX_AF_INET6 == type) {
             // we need the next 16 bytes.
             unsafeToSockAddr(*storage, unsafeAddress + currentOffest, 16);
             currentOffest += 16;
@@ -281,7 +285,8 @@ inline jlong encodeAddrInfoToUnsafe(const addrinfo *addrInfo,
             memcpy(&(pointer[index]), &(storage->sin.sin_addr.s_addr), in4len);
             index += 4;
         } else if (AF_INET6 == current->ai_family) {
-            pointer[index++] = AF_INET6;
+            // the java assumes 10, which is linux.
+            pointer[index++] = LINUX_AF_INET6;
             memcpy(&(pointer[index]), &(storage->sin6.sin6_addr.s6_addr),
                     in6len);
             // we need the current 16 bytes.

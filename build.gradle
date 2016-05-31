@@ -6,9 +6,9 @@ apply plugin: 'maven-publish'
 apply plugin: 'eclipse'
 //apply plugin: 'me.champeau.gradle:jmh-gradle-plugin:0.3.0'
 
-//jmh {
-//  jmhVersion = '1.12'
-//}
+repositories {
+    mavenCentral()
+}
 
 
 test {

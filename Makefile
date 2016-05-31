@@ -39,7 +39,12 @@ LFLAGS = -Wall -lpthread -shared  -lstdc++
 
 LIBNAME=libtestutf8.$(EXT)
 
+all: check $(LIBNAME)
 
+check:
+	echo $JAVA_HOME
+	uname -a
+	uname -s 
 
 $(LIBNAME): $(OBJECTS)
 	$(CC) $(LFLAGS) $(OBJECTS) -shared -o $(LIBS_DIR)/$@

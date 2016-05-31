@@ -13,7 +13,7 @@ TARGET_ARCH=x86_64-darwin-clang
 endif
 
 ifeq ($(UNAME_S),Linux)
-JAVA_HOME=/usr/java/default
+JAVA_HOME?=/usr/java/default
 JAVA_OS=linux
 LINUX_ADD=amd64/
 EXT=so

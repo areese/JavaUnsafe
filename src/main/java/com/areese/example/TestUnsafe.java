@@ -29,9 +29,8 @@ public class TestUnsafe implements Runnable {
 
         for (int i = 0; i < count; i++) {
             // yes it leaks
-            //new MissingFingers(size);
+            new MissingFingers(size);
             ByteBuffer a = ByteBuffer.allocateDirect(size);
-            a.array();
             total += size;
             System.err.println("Allocation total: " + total);
         }

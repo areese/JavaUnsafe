@@ -29,19 +29,6 @@ typedef jlong (*allocateMemoryFptr)(JNIEnv *env, jobject unsafe, jlong size);
 reallocateMemoryFptr oldReallocateMemory = NULL;
 allocateMemoryFptr oldAllocateMemory = NULL;
 
-jlong new_Unsafe_ReallocateMemory(JNIEnv *env, jobject unsafe, jlong addr, jlong size)
-{
-  fprintf(stderr, "reallocating %d bytes for %p\n", size, addr);
-  return (*oldReallocateMemory)(env, unsafe, addr, size);
-}
-
-
-jlong new_Unsafe_AllocateMemory(JNIEnv *env, jobject unsafe, jlong size)
-{
-  fprintf(stderr, "allocating %d bytes\n", size);
-  return (*oldAllocateMemory)(env, unsafe, size);
-}
-
 static void release(jvmtiEnv *jvmti_env, char **p) {
   if (NULL == p) {
     return;
@@ -87,36 +74,28 @@ static void exit_critical_section(jvmtiEnv *jvmti_env) {
   check_jvmti_error(jvmti_env, error, "Cannot exit with raw monitor");
 }
 
-JNICALL void cbMethodEntry
-    (jvmtiEnv *jvmti_env,
-     JNIEnv* jni_env,
-     jthread thread,
-     jmethodID method)
-{
-  enter_critical_section(jvmti_env);
+const char *getPhaseString(jvmtiPhase p) {
+  switch (p) {
+    case JVMTI_PHASE_ONLOAD: return "JVMTI_PHASE_ONLOAD";
+    case JVMTI_PHASE_PRIMORDIAL: return "JVMTI_PHASE_PRIMORDIAL";
+    case JVMTI_PHASE_START: return "JVMTI_PHASE_START";
+    case JVMTI_PHASE_LIVE: return "JVMTI_PHASE_LIVE";
+    case JVMTI_PHASE_DEAD: return "JVMTI_PHASE_DEAD";
+    default: return "huh?";
+  }
+  return "huh?";
+}
 
-  char *methodName = NULL;
-  char *signaturePtr = NULL;
-  char *genericPtr = NULL;
+void dump_stack_in_jvmti(jvmtiEnv *jvmti_env, const char *prefix) {
   jvmtiError err = JVMTI_ERROR_NONE;
 
-  err = jvmti_env->GetMethodName(method, &methodName, &signaturePtr, &genericPtr);
-  if (err != JVMTI_ERROR_NONE) {
-    check_jvmti_error(jvmti_env, err, "GetMethodName failed\n");
-    exit_critical_section(jvmti_env);
+  jvmtiPhase phase;
+  err = jvmti_env->GetPhase(&phase);
+  if (phase != JVMTI_PHASE_LIVE) {
     return;
   }
 
-  if (NULL == methodName || strcmp(methodName, "allocateMemory")!=0) {
-    exit_critical_section(jvmti_env);
-    return;
-  }
-
-  fprintf(stderr,"MethodEntry: %s\n", methodName);
-
-  release(jvmti_env, &methodName);
-  release(jvmti_env, &signaturePtr);
-  release(jvmti_env, &genericPtr);
+  fprintf(stderr,"%s dump: phase %s\n", prefix, getPhaseString(phase));
 
   jvmtiFrameInfo frames[5] = {0,};
   jint count = 0;
@@ -147,12 +126,12 @@ JNICALL void cbMethodEntry
           check_jvmti_error(jvmti_env, err, "GetClassSignature failed\n");
 
           jint paramsSize = 0;
-          if (err == JVMTI_ERROR_NONE) {
-            err = jvmti_env->GetArgumentsSize(frames[i].method, &paramsSize);
-            check_jvmti_error(jvmti_env, err, "GetArgumentsSize failed\n");
+          // if (err == JVMTI_ERROR_NONE) {
+          //   err = jvmti_env->GetArgumentsSize(frames[i].method, &paramsSize);
+          //   check_jvmti_error(jvmti_env, err, "GetArgumentsSize failed\n");
 
-          }
-          fprintf(stderr,"[%d] %s::%s  (%d)\n", i, classSignature, framesMethodName, paramsSize);
+          // }
+          fprintf(stderr,"%s [%d] %s::%s  (%d)\n", prefix, i, classSignature, framesMethodName, paramsSize);
 
           release(jvmti_env, &classSignature);
           release(jvmti_env, &classGeneric);
@@ -164,6 +143,55 @@ JNICALL void cbMethodEntry
       }
     }
   }
+}
+
+jlong new_Unsafe_ReallocateMemory(JNIEnv *env, jobject unsafe, jlong addr, jlong size)
+{
+  fprintf(stderr, "reallocating %d bytes for %p\n", size, addr);
+  jvmtiEnv *jvmti_env = gdata->jvmti;
+  dump_stack_in_jvmti(jvmti_env, "new_Unsafe_ReallocateMemory");
+  return (*oldReallocateMemory)(env, unsafe, addr, size);
+}
+
+
+jlong new_Unsafe_AllocateMemory(JNIEnv *env, jobject unsafe, jlong size)
+{
+  fprintf(stderr, "allocating %d bytes\n", size);
+  jvmtiEnv *jvmti_env = gdata->jvmti;
+  dump_stack_in_jvmti(jvmti_env, "new_Unsafe_AllocateMemory");
+  return (*oldAllocateMemory)(env, unsafe, size);
+}
+
+JNICALL void cbMethodEntry
+    (jvmtiEnv *jvmti_env,
+     JNIEnv* jni_env,
+     jthread thread,
+     jmethodID method)
+{
+  enter_critical_section(jvmti_env);
+
+  char *methodName = NULL;
+  char *signaturePtr = NULL;
+  char *genericPtr = NULL;
+  jvmtiError err = JVMTI_ERROR_NONE;
+
+  err = jvmti_env->GetMethodName(method, &methodName, &signaturePtr, &genericPtr);
+  if (err != JVMTI_ERROR_NONE) {
+    check_jvmti_error(jvmti_env, err, "GetMethodName failed\n");
+    exit_critical_section(jvmti_env);
+    return;
+  }
+
+
+  bool isAllocate = (0 == strcmp(methodName,"allocateMemory"));
+  bool isReAllocate = (0 == strcmp(methodName, "reallocateMemory"));
+
+  if (!isAllocate && !isReAllocate) {
+    exit_critical_section(jvmti_env);
+    return;
+  }
+  fprintf(stderr, "in cbMethodEntry\n");
+  dump_stack_in_jvmti(jvmti_env, "cbMethodEntry");
 
   exit_critical_section(jvmti_env);
 }
@@ -210,15 +238,28 @@ JNICALL void cbNativeMethodBind
       exit_critical_section(jvmti_env);
       return;
     }
+    fprintf(stderr, "in cbNativeMethodBind\n");
 
     if (isAllocate) {
-      oldAllocateMemory = (allocateMemoryFptr)address;
-      *new_address_ptr = (void*)new_Unsafe_AllocateMemory;
+      // if (NULL == oldAllocateMemory) {
+        oldAllocateMemory = (allocateMemoryFptr)address;
+        *new_address_ptr = (void*)new_Unsafe_AllocateMemory;
+      // } else {
+      //   *new_address_ptr = address;
+      //   exit_critical_section(jvmti_env);
+      //   return;
+      // }
     }
 
     if (isReAllocate) {
-      oldReallocateMemory = (reallocateMemoryFptr)address;
-      *new_address_ptr = (void*)new_Unsafe_ReallocateMemory;
+      // if (NULL == oldReallocateMemory) {
+        oldReallocateMemory = (reallocateMemoryFptr)address;
+        *new_address_ptr = (void*)new_Unsafe_ReallocateMemory;
+      // } else {
+      //   *new_address_ptr = address;
+      //   exit_critical_section(jvmti_env);
+      //   return;
+      // }
     }
 
     jclass klass = NULL;
@@ -283,7 +324,7 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *jvm, char *options,
 
   //Register our capabilities
   memset(&caps, 0, sizeof(jvmtiCapabilities));
-//  caps.can_generate_method_entry_events = 1;
+ caps.can_generate_method_entry_events = 1;
 //  caps.can_generate_method_exit_events = 1;
   caps.can_generate_native_method_bind_events = 1;
 
@@ -293,7 +334,7 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *jvm, char *options,
 
   //Register callbacks
   (void) memset(&callbacks, 0, sizeof(callbacks));
-//  callbacks.MethodEntry = &cbMethodEntry;
+ callbacks.MethodEntry = &cbMethodEntry;
 //  callbacks.MethodExit =  &cbMethodExit;
   callbacks.NativeMethodBind =  &cbNativeMethodBind;
 
@@ -317,9 +358,9 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *jvm, char *options,
       (jthread) NULL);
   check_jvmti_error(jvmti_env, error, "Cannot set MethodEntry event notification");
 
-  error = jvmti_env->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_METHOD_EXIT,
-      (jthread) NULL);
-  check_jvmti_error(jvmti_env, error, "Cannot set MethodExit event notification");
+  // error = jvmti_env->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_METHOD_EXIT,
+  //     (jthread) NULL);
+  // check_jvmti_error(jvmti_env, error, "Cannot set MethodExit event notification");
 
    error = jvmti_env->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_NATIVE_METHOD_BIND,
        (jthread) NULL);

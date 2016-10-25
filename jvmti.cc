@@ -31,12 +31,14 @@ allocateMemoryFptr oldAllocateMemory = NULL;
 
 jlong new_Unsafe_ReallocateMemory(JNIEnv *env, jobject unsafe, jlong addr, jlong size)
 {
+  fprintf(stderr, "reallocating %d bytes for %p\n", size, addr);
   return (*oldReallocateMemory)(env, unsafe, addr, size);
 }
 
 
 jlong new_Unsafe_AllocateMemory(JNIEnv *env, jobject unsafe, jlong size)
 {
+  fprintf(stderr, "allocating %d bytes\n", size);
   return (*oldAllocateMemory)(env, unsafe, size);
 }
 
@@ -207,6 +209,16 @@ JNICALL void cbNativeMethodBind
     if (!isAllocate && !isReAllocate) {
       exit_critical_section(jvmti_env);
       return;
+    }
+
+    if (isAllocate) {
+      oldAllocateMemory = (allocateMemoryFptr)address;
+      *new_address_ptr = (void*)new_Unsafe_AllocateMemory;
+    }
+
+    if (isReAllocate) {
+      oldReallocateMemory = (reallocateMemoryFptr)address;
+      *new_address_ptr = (void*)new_Unsafe_ReallocateMemory;
     }
 
     jclass klass = NULL;

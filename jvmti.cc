@@ -5,31 +5,29 @@
 #include "jvmti.h"
 #include "jni.h"
 
-
-typedef struct {
-  /* JVMTI Environment */
-  jvmtiEnv *jvmti;
-  JNIEnv * jni;
-  jboolean vm_is_started;
-  jboolean vmDead;
-
-  /* Data access Lock */
-  jrawMonitorID lock;
-  JavaVM* jvm;
-} GlobalAgentData;
-
-
-GlobalAgentData data;
-GlobalAgentData *gdata;
-
-
+// Function pointers for the native functions we need to replace
 typedef jlong (*reallocateMemoryFptr)(JNIEnv *env, jobject unsafe, jlong addr, jlong size);
 typedef jlong (*allocateMemoryFptr)(JNIEnv *env, jobject unsafe, jlong size);
 
-reallocateMemoryFptr oldReallocateMemory = NULL;
-allocateMemoryFptr oldAllocateMemory = NULL;
 
-static void release(jvmtiEnv *jvmti_env, char **p) {
+// Global gdata.that we're using.
+typedef struct GlobalAgentdata {
+  jvmtiEnv *jvmti;
+  jrawMonitorID lock;
+  JavaVM* jvm;
+  reallocateMemoryFptr oldReallocateMemory;
+  allocateMemoryFptr oldAllocateMemory;
+} GlobalAgentdata;
+
+// global gdata.
+GlobalAgentdata gdata;
+
+
+/**
+ * This function will release a given pointer using Deallocate,
+ * and overwrite the old pointer to now point at NULL
+ */
+static inline void release(jvmtiEnv *jvmti_env, unsigned char **p) {
   if (NULL == p) {
     return;
   }
@@ -38,31 +36,86 @@ static void release(jvmtiEnv *jvmti_env, char **p) {
     return;
   }
 
-  jvmti_env->Deallocate((unsigned char *)*p);
+  jvmti_env->Deallocate(*p);
+
   *p = NULL;
 }
 
-static void check_jvmti_error(jvmtiEnv *jvmti_env, jvmtiError errnum,
-    const char *str) {
-  if (errnum != JVMTI_ERROR_NONE) {
-    char *errnum_str;
+/**
+ * This class makes keeping track of jvmti allocated memory easier
+ */
+class ScopedJvmtiPointer {
+public:
+  ScopedJvmtiPointer(jvmtiEnv *jvmti_env) : jvmti_env(jvmti_env), vp(NULL)
+  {}
 
-    errnum_str = NULL;
-    jvmti_env->GetErrorName(errnum, &errnum_str);
+  ScopedJvmtiPointer(jvmtiEnv *jvmti_env, void *ip) : jvmti_env(jvmti_env), vp(ip)
+  {}
 
-    fprintf(stderr, "ERROR: JVMTI: %d(%s): %s\n", errnum,
-        (errnum_str == NULL ? "Unknown" : errnum_str),
-        (str == NULL ? "" : str));
+  ScopedJvmtiPointer(jvmtiEnv *jvmti_env, char *ip) : jvmti_env(jvmti_env), cp(ip)
+  {}
 
-    release(jvmti_env, &errnum_str);
+  ~ScopedJvmtiPointer()
+  { ::release(jvmti_env, &ucp); }
+
+  void set(void *ip) {
+    this->vp = ip;
   }
+
+  void set(char *ip) {
+    this->cp = ip;
+  }
+
+  void *get() {
+    return this->vp;
+  }
+
+  char *str() {
+    return this->cp;
+  }
+
+  void **address() {
+    return &this->vp;
+  }
+
+  char **strAddress() {
+    return &this->cp;
+  }
+
+private:
+  union {
+    void *vp;
+    char *cp;
+    unsigned char *ucp;
+  };
+
+  jvmtiEnv *jvmti_env;
+};
+
+
+/**
+ * This function checks for a jvmti error, and prints out the error release
+ */
+static void check_jvmti_error(jvmtiEnv *jvmti_env, jvmtiError errnum, const char *reason)
+{
+  if (errnum == JVMTI_ERROR_NONE) {
+    return;
+  }
+   
+  ScopedJvmtiPointer errString(jvmti_env);
+
+  jvmti_env->GetErrorName(errnum, errString.strAddress());
+
+  fprintf(stderr, "ERROR: JVMTI: %d(%s): %s\n", errnum,
+      (NULL == errString.str() ? "Unknown" : errString.str()),
+      (NULL == reason ? "" : reason));
 }
 
 /* Enter a critical section by doing a JVMTI Raw Monitor Enter */
 static void enter_critical_section(jvmtiEnv *jvmti_env) {
   jvmtiError error;
 
-  error = jvmti_env->RawMonitorEnter(gdata->lock);
+  error = jvmti_env->RawMonitorEnter(gdata.lock);
   check_jvmti_error(jvmti_env, error, "Cannot enter with raw monitor");
 }
 
@@ -70,11 +123,14 @@ static void enter_critical_section(jvmtiEnv *jvmti_env) {
 static void exit_critical_section(jvmtiEnv *jvmti_env) {
   jvmtiError error;
 
-  error = jvmti_env->RawMonitorExit(gdata->lock);
+  error = jvmti_env->RawMonitorExit(gdata.lock);
   check_jvmti_error(jvmti_env, error, "Cannot exit with raw monitor");
 }
 
-const char *getPhaseString(jvmtiPhase p) {
+/**
+ * Given a jvmti phase, return the human readable string
+ */
+static const char *getPhaseString(jvmtiPhase p) {
   switch (p) {
     case JVMTI_PHASE_ONLOAD: return "JVMTI_PHASE_ONLOAD";
     case JVMTI_PHASE_PRIMORDIAL: return "JVMTI_PHASE_PRIMORDIAL";
@@ -83,10 +139,15 @@ const char *getPhaseString(jvmtiPhase p) {
     case JVMTI_PHASE_DEAD: return "JVMTI_PHASE_DEAD";
     default: return "huh?";
   }
+
   return "huh?";
 }
 
-void dump_stack_in_jvmti(jvmtiEnv *jvmti_env, const char *prefix) {
+/**
+ * This function will dump the first 5 frames of the stack if
+ * called while the jvm is live
+ */
+static void dump_stack_in_jvmti(jvmtiEnv *jvmti_env, const char *prefix) {
   jvmtiError err = JVMTI_ERROR_NONE;
 
   jvmtiPhase phase;
@@ -104,42 +165,38 @@ void dump_stack_in_jvmti(jvmtiEnv *jvmti_env, const char *prefix) {
   check_jvmti_error(jvmti_env, err, "GetStackTrace failed\n");
 
   if (err == JVMTI_ERROR_NONE && count >= 1) {
-    int i=0;
-    for (;i<count;i++) {
+      for (int i = 0; i < count; i++) {
       jclass klass = NULL;
       err = jvmti_env->GetMethodDeclaringClass(frames[i].method, &klass);
       check_jvmti_error(jvmti_env, err, "GetMethodDeclaringClass failed\n");
 
       if (err == JVMTI_ERROR_NONE) {
-        char *framesMethodName = NULL;
-        char *framesSignaturePtr = NULL;
-        char *framesGenericPtr = NULL;
+          ScopedJvmtiPointer framesMethodName(jvmti_env);
+          ScopedJvmtiPointer framesSignaturePtr(jvmti_env);
+          ScopedJvmtiPointer framesGenericPtr(jvmti_env);
 
-        err = jvmti_env->GetMethodName(frames[i].method, &framesMethodName, &framesSignaturePtr, &framesGenericPtr);
+        err = jvmti_env->GetMethodName(frames[i].method,
+          framesMethodName.strAddress(),
+          framesSignaturePtr.strAddress(),
+          framesGenericPtr.strAddress());
+
         check_jvmti_error(jvmti_env, err, "GetMethodName2 failed\n");
 
         if (err == JVMTI_ERROR_NONE) {
-          char *classSignature = NULL;
-          char *classGeneric = NULL;
+          ScopedJvmtiPointer classSignature(jvmti_env);
+          ScopedJvmtiPointer classGeneric(jvmti_env);
 
-          err = jvmti_env->GetClassSignature(klass, &classSignature, &classGeneric);
+          err = jvmti_env->GetClassSignature(klass, classSignature.strAddress(), classGeneric.strAddress());
           check_jvmti_error(jvmti_env, err, "GetClassSignature failed\n");
 
+          // FIXME: can add the parameters size if it's not a native function.
           jint paramsSize = 0;
           // if (err == JVMTI_ERROR_NONE) {
           //   err = jvmti_env->GetArgumentsSize(frames[i].method, &paramsSize);
           //   check_jvmti_error(jvmti_env, err, "GetArgumentsSize failed\n");
-
           // }
-          fprintf(stderr,"%s [%d] %s::%s  (%d)\n", prefix, i, classSignature, framesMethodName, paramsSize);
-
-          release(jvmti_env, &classSignature);
-          release(jvmti_env, &classGeneric);
+          fprintf(stderr,"%s [%d] %s::%s  (%d)\n", prefix, i, classSignature.str(), framesMethodName.str(), paramsSize);
         }
-
-        release(jvmti_env, &framesMethodName);
-        release(jvmti_env, &framesSignaturePtr);
-        release(jvmti_env, &framesGenericPtr);
       }
     }
   }
@@ -147,19 +204,16 @@ void dump_stack_in_jvmti(jvmtiEnv *jvmti_env, const char *prefix) {
 
 jlong new_Unsafe_ReallocateMemory(JNIEnv *env, jobject unsafe, jlong addr, jlong size)
 {
-  fprintf(stderr, "reallocating %d bytes for %p\n", size, addr);
-  jvmtiEnv *jvmti_env = gdata->jvmti;
-  dump_stack_in_jvmti(jvmti_env, "new_Unsafe_ReallocateMemory");
-  return (*oldReallocateMemory)(env, unsafe, addr, size);
+  fprintf(stderr, "reallocating %ld bytes for %lx\n", size, addr);
+  dump_stack_in_jvmti(gdata.jvmti, "new_Unsafe_ReallocateMemory");
+  return (*gdata.oldReallocateMemory)(env, unsafe, addr, size);
 }
-
 
 jlong new_Unsafe_AllocateMemory(JNIEnv *env, jobject unsafe, jlong size)
 {
-  fprintf(stderr, "allocating %d bytes\n", size);
-  jvmtiEnv *jvmti_env = gdata->jvmti;
-  dump_stack_in_jvmti(jvmti_env, "new_Unsafe_AllocateMemory");
-  return (*oldAllocateMemory)(env, unsafe, size);
+  fprintf(stderr, "allocating %ld bytes\n", size);
+  dump_stack_in_jvmti(gdata.jvmti, "new_Unsafe_AllocateMemory");
+  return (*gdata.oldAllocateMemory)(env, unsafe, size);
 }
 
 JNICALL void cbMethodEntry
@@ -219,20 +273,20 @@ JNICALL void cbNativeMethodBind
     // default to nothing.
     *new_address_ptr = address;
 
-    char *methodName = NULL;
-    char *signaturePtr = NULL;
-    char *genericPtr = NULL;
+    ScopedJvmtiPointer methodName(jvmti_env);
+    ScopedJvmtiPointer signature(jvmti_env);
+    ScopedJvmtiPointer generic(jvmti_env);
     jvmtiError err = JVMTI_ERROR_NONE;
 
-    err = jvmti_env->GetMethodName(method, &methodName, &signaturePtr, &genericPtr);
+    err = jvmti_env->GetMethodName(method, methodName.strAddress(), signature.strAddress(), generic.strAddress());
     if (err != JVMTI_ERROR_NONE) {
       check_jvmti_error(jvmti_env, err, "GetMethodName failed\n");
       exit_critical_section(jvmti_env);
       return;
     }
 
-    bool isAllocate = (0 == strcmp(methodName,"allocateMemory"));
-    bool isReAllocate = (0 == strcmp(methodName, "reallocateMemory"));
+    bool isAllocate = (0 == strcmp(methodName.str(),"allocateMemory"));
+    bool isReAllocate = (0 == strcmp(methodName.str(), "reallocateMemory"));
 
     if (!isAllocate && !isReAllocate) {
       exit_critical_section(jvmti_env);
@@ -242,7 +296,7 @@ JNICALL void cbNativeMethodBind
 
     if (isAllocate) {
       // if (NULL == oldAllocateMemory) {
-        oldAllocateMemory = (allocateMemoryFptr)address;
+        gdata.oldAllocateMemory = (allocateMemoryFptr)address;
         *new_address_ptr = (void*)new_Unsafe_AllocateMemory;
       // } else {
       //   *new_address_ptr = address;
@@ -253,7 +307,7 @@ JNICALL void cbNativeMethodBind
 
     if (isReAllocate) {
       // if (NULL == oldReallocateMemory) {
-        oldReallocateMemory = (reallocateMemoryFptr)address;
+        gdata.oldReallocateMemory = (reallocateMemoryFptr)address;
         *new_address_ptr = (void*)new_Unsafe_ReallocateMemory;
       // } else {
       //   *new_address_ptr = address;
@@ -263,16 +317,20 @@ JNICALL void cbNativeMethodBind
     }
 
     jclass klass = NULL;
-    char *classSignature = NULL;
-    char *classGeneric = NULL;
+    ScopedJvmtiPointer classSignature(jvmti_env);
+    ScopedJvmtiPointer classGeneric(jvmti_env);
 
     err = jvmti_env->GetMethodDeclaringClass(method, &klass);
     check_jvmti_error(jvmti_env, err, "GetMethodDeclaringClass failed\n");
 
-    err = jvmti_env->GetClassSignature(klass, &classSignature, &classGeneric);
+    err = jvmti_env->GetClassSignature(klass, classSignature.strAddress(), classGeneric.strAddress());
     check_jvmti_error(jvmti_env, err, "GetClassSignature failed\n");
 
-    fprintf(stderr,"cbNativeMethodBind: %s::%s old (%p) new: (%p)\n", classSignature, methodName, address, *new_address_ptr);
+    fprintf(stderr,"cbNativeMethodBind: %s::%s old (%p) new: (%p)\n",
+      classSignature.str(),
+      methodName.str(),
+      address,
+      *new_address_ptr);
 
 //    fprintf(stderr,"cbNativeMethodBind: %s\n", methodName);
 //
@@ -280,13 +338,6 @@ JNICALL void cbNativeMethodBind
 //      exit_critical_section(jvmti_env);
 //      return;
 //    }
-
-    release(jvmti_env, &methodName);
-    release(jvmti_env, &signaturePtr);
-    release(jvmti_env, &genericPtr);
-
-    release(jvmti_env, &classSignature);
-    release(jvmti_env, &classGeneric);
 
     exit_critical_section(jvmti_env);
 }
@@ -304,14 +355,13 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *jvm, char *options,
   jvmtiEnv *jvmti_env = NULL;
   jvmtiCapabilities caps;
 
-  gdata = &data;
-  memset((void*) gdata, 0, sizeof(data));
+  memset((void*) &gdata, 0, sizeof(gdata));
 
   //save jvmti_env for later
-  gdata->jvm = jvm;
+  gdata.jvm = jvm;
 
   res = jvm->GetEnv((void **) &jvmti_env, JVMTI_VERSION_1_0);
-  gdata->jvmti = jvmti_env;
+  gdata.jvmti = jvmti_env;
 
   if (res != JNI_OK || jvmti_env == NULL) {
     /* This means that the VM was unable to obtain this version of the
@@ -369,7 +419,7 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *jvm, char *options,
 
 
   //Set up a few locks
-  error = jvmti_env->CreateRawMonitor("agent data", &(gdata->lock));
+  error = jvmti_env->CreateRawMonitor("agent data", &(gdata.lock));
   check_jvmti_error(jvmti_env, error, "Cannot create raw monitor");
 
   return JNI_OK;

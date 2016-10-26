@@ -92,7 +92,6 @@ private:
   jvmtiEnv *jvmti_env;
 };
 
-
 /**
  * This function checks for a jvmti error, and prints out the error release
  */
@@ -112,7 +111,7 @@ static void check_jvmti_error(jvmtiEnv *jvmti_env, jvmtiError errnum, const char
 }
 
 /* Enter a critical section by doing a JVMTI Raw Monitor Enter */
-static void enter_critical_section(jvmtiEnv *jvmti_env) {
+static inline void enter_critical_section(jvmtiEnv *jvmti_env) {
   jvmtiError error;
 
   error = jvmti_env->RawMonitorEnter(gdata.lock);
@@ -120,12 +119,27 @@ static void enter_critical_section(jvmtiEnv *jvmti_env) {
 }
 
 /* Exit a critical section by doing a JVMTI Raw Monitor Exit */
-static void exit_critical_section(jvmtiEnv *jvmti_env) {
+static inline void exit_critical_section(jvmtiEnv *jvmti_env) {
   jvmtiError error;
 
   error = jvmti_env->RawMonitorExit(gdata.lock);
   check_jvmti_error(jvmti_env, error, "Cannot exit with raw monitor");
 }
+
+class ScopedCriticalSection {
+public:
+  ScopedCriticalSection(jvmtiEnv *jvmti_env) :jvmti_env(jvmti_env)
+  {
+    enter_critical_section(jvmti_env);
+  }
+
+  ~ScopedCriticalSection() {
+    exit_critical_section(jvmti_env);
+  }
+
+private:
+  jvmtiEnv *jvmti_env;
+};
 
 /**
  * Given a jvmti phase, return the human readable string
@@ -164,41 +178,46 @@ static void dump_stack_in_jvmti(jvmtiEnv *jvmti_env, const char *prefix) {
   err = jvmti_env->GetStackTrace(NULL, 0, 5, frames, &count);
   check_jvmti_error(jvmti_env, err, "GetStackTrace failed\n");
 
-  if (err == JVMTI_ERROR_NONE && count >= 1) {
-      for (int i = 0; i < count; i++) {
-      jclass klass = NULL;
-      err = jvmti_env->GetMethodDeclaringClass(frames[i].method, &klass);
-      check_jvmti_error(jvmti_env, err, "GetMethodDeclaringClass failed\n");
+  if (JVMTI_ERROR_NONE != err || count <= 1) {
+    return;
+  }
 
-      if (err == JVMTI_ERROR_NONE) {
-          ScopedJvmtiPointer framesMethodName(jvmti_env);
-          ScopedJvmtiPointer framesSignaturePtr(jvmti_env);
-          ScopedJvmtiPointer framesGenericPtr(jvmti_env);
+  for (int i = 0; i < count; i++) {
+    jclass klass = NULL;
+    err = jvmti_env->GetMethodDeclaringClass(frames[i].method, &klass);
+    check_jvmti_error(jvmti_env, err, "GetMethodDeclaringClass failed\n");
 
-        err = jvmti_env->GetMethodName(frames[i].method,
-          framesMethodName.strAddress(),
-          framesSignaturePtr.strAddress(),
-          framesGenericPtr.strAddress());
-
-        check_jvmti_error(jvmti_env, err, "GetMethodName2 failed\n");
-
-        if (err == JVMTI_ERROR_NONE) {
-          ScopedJvmtiPointer classSignature(jvmti_env);
-          ScopedJvmtiPointer classGeneric(jvmti_env);
-
-          err = jvmti_env->GetClassSignature(klass, classSignature.strAddress(), classGeneric.strAddress());
-          check_jvmti_error(jvmti_env, err, "GetClassSignature failed\n");
-
-          // FIXME: can add the parameters size if it's not a native function.
-          jint paramsSize = 0;
-          // if (err == JVMTI_ERROR_NONE) {
-          //   err = jvmti_env->GetArgumentsSize(frames[i].method, &paramsSize);
-          //   check_jvmti_error(jvmti_env, err, "GetArgumentsSize failed\n");
-          // }
-          fprintf(stderr,"%s [%d] %s::%s  (%d)\n", prefix, i, classSignature.str(), framesMethodName.str(), paramsSize);
-        }
-      }
+    if (JVMTI_ERROR_NONE != err) {
+      continue;
     }
+
+    ScopedJvmtiPointer framesMethodName(jvmti_env);
+    ScopedJvmtiPointer framesSignaturePtr(jvmti_env);
+    ScopedJvmtiPointer framesGenericPtr(jvmti_env);
+
+    err = jvmti_env->GetMethodName(frames[i].method,
+      framesMethodName.strAddress(),
+      framesSignaturePtr.strAddress(),
+      framesGenericPtr.strAddress());
+
+    check_jvmti_error(jvmti_env, err, "GetMethodName2 failed\n");
+    if (JVMTI_ERROR_NONE != err) {
+      continue;
+    }
+
+    ScopedJvmtiPointer classSignature(jvmti_env);
+    ScopedJvmtiPointer classGeneric(jvmti_env);
+
+    err = jvmti_env->GetClassSignature(klass, classSignature.strAddress(), classGeneric.strAddress());
+    check_jvmti_error(jvmti_env, err, "GetClassSignature failed\n");
+
+    // FIXME: can add the parameters size if it's not a native function.
+    jint paramsSize = 0;
+    // if (err == JVMTI_ERROR_NONE) {
+    //   err = jvmti_env->GetArgumentsSize(frames[i].method, &paramsSize);
+    //   check_jvmti_error(jvmti_env, err, "GetArgumentsSize failed\n");
+    // }
+    fprintf(stderr,"%s [%d] %s::%s  (%d)\n", prefix, i, classSignature.str(), framesMethodName.str(), paramsSize);
   }
 }
 
@@ -222,32 +241,30 @@ JNICALL void cbMethodEntry
      jthread thread,
      jmethodID method)
 {
-  enter_critical_section(jvmti_env);
+  ScopedCriticalSection cs(jvmti_env);
 
-  char *methodName = NULL;
-  char *signaturePtr = NULL;
-  char *genericPtr = NULL;
+  ScopedJvmtiPointer methodName(jvmti_env);
+  ScopedJvmtiPointer signature(jvmti_env);
+  ScopedJvmtiPointer generic(jvmti_env);
+
   jvmtiError err = JVMTI_ERROR_NONE;
 
-  err = jvmti_env->GetMethodName(method, &methodName, &signaturePtr, &genericPtr);
-  if (err != JVMTI_ERROR_NONE) {
-    check_jvmti_error(jvmti_env, err, "GetMethodName failed\n");
-    exit_critical_section(jvmti_env);
+  err = jvmti_env->GetMethodName(method, methodName.strAddress(), signature.strAddress(), generic.strAddress());
+  check_jvmti_error(jvmti_env, err, "GetMethodName failed\n");
+
+  if (JVMTI_ERROR_NONE != err) {
     return;
   }
 
-
-  bool isAllocate = (0 == strcmp(methodName,"allocateMemory"));
-  bool isReAllocate = (0 == strcmp(methodName, "reallocateMemory"));
+  bool isAllocate = (0 == strcmp(methodName.str(),"allocateMemory"));
+  bool isReAllocate = (0 == strcmp(methodName.str(), "reallocateMemory"));
 
   if (!isAllocate && !isReAllocate) {
-    exit_critical_section(jvmti_env);
     return;
   }
+
   fprintf(stderr, "in cbMethodEntry\n");
   dump_stack_in_jvmti(jvmti_env, "cbMethodEntry");
-
-  exit_critical_section(jvmti_env);
 }
 
 JNICALL void cbMethodExit
@@ -268,69 +285,74 @@ JNICALL void cbNativeMethodBind
      void* address,
      void** new_address_ptr)
 {
-    enter_critical_section(jvmti_env);
+  ScopedCriticalSection cs(jvmti_env);
 
-    // default to nothing.
-    *new_address_ptr = address;
+  // default to nothing.
+  *new_address_ptr = address;
 
-    ScopedJvmtiPointer methodName(jvmti_env);
-    ScopedJvmtiPointer signature(jvmti_env);
-    ScopedJvmtiPointer generic(jvmti_env);
-    jvmtiError err = JVMTI_ERROR_NONE;
+  ScopedJvmtiPointer methodName(jvmti_env);
+  ScopedJvmtiPointer signature(jvmti_env);
+  ScopedJvmtiPointer generic(jvmti_env);
+  jvmtiError err = JVMTI_ERROR_NONE;
 
-    err = jvmti_env->GetMethodName(method, methodName.strAddress(), signature.strAddress(), generic.strAddress());
-    if (err != JVMTI_ERROR_NONE) {
-      check_jvmti_error(jvmti_env, err, "GetMethodName failed\n");
-      exit_critical_section(jvmti_env);
-      return;
-    }
+  err = jvmti_env->GetMethodName(method, methodName.strAddress(), signature.strAddress(), generic.strAddress());
+  check_jvmti_error(jvmti_env, err, "GetMethodName failed\n");
+  if (JVMTI_ERROR_NONE != err) {
+    return;
+  }
 
-    bool isAllocate = (0 == strcmp(methodName.str(),"allocateMemory"));
-    bool isReAllocate = (0 == strcmp(methodName.str(), "reallocateMemory"));
+  bool isAllocate = (0 == strcmp(methodName.str(),"allocateMemory"));
+  bool isReAllocate = (0 == strcmp(methodName.str(), "reallocateMemory"));
 
-    if (!isAllocate && !isReAllocate) {
-      exit_critical_section(jvmti_env);
-      return;
-    }
-    fprintf(stderr, "in cbNativeMethodBind\n");
+  if (!isAllocate && !isReAllocate) {
+    exit_critical_section(jvmti_env);
+    return;
+  }
+  fprintf(stderr, "in cbNativeMethodBind\n");
 
-    if (isAllocate) {
-      // if (NULL == oldAllocateMemory) {
-        gdata.oldAllocateMemory = (allocateMemoryFptr)address;
-        *new_address_ptr = (void*)new_Unsafe_AllocateMemory;
-      // } else {
-      //   *new_address_ptr = address;
-      //   exit_critical_section(jvmti_env);
-      //   return;
-      // }
-    }
+  if (isAllocate) {
+    // if (NULL == oldAllocateMemory) {
+    gdata.oldAllocateMemory = (allocateMemoryFptr)address;
+    *new_address_ptr = (void*)new_Unsafe_AllocateMemory;
+    // } else {
+    //   *new_address_ptr = address;
+    //   exit_critical_section(jvmti_env);
+    //   return;
+    // }
+  }
 
-    if (isReAllocate) {
-      // if (NULL == oldReallocateMemory) {
-        gdata.oldReallocateMemory = (reallocateMemoryFptr)address;
-        *new_address_ptr = (void*)new_Unsafe_ReallocateMemory;
-      // } else {
-      //   *new_address_ptr = address;
-      //   exit_critical_section(jvmti_env);
-      //   return;
-      // }
-    }
+  if (isReAllocate) {
+    // if (NULL == oldReallocateMemory) {
+    gdata.oldReallocateMemory = (reallocateMemoryFptr)address;
+    *new_address_ptr = (void*)new_Unsafe_ReallocateMemory;
+    // } else {
+    //   *new_address_ptr = address;
+    //   exit_critical_section(jvmti_env);
+    //   return;
+    // }
+  }
 
-    jclass klass = NULL;
-    ScopedJvmtiPointer classSignature(jvmti_env);
-    ScopedJvmtiPointer classGeneric(jvmti_env);
+  jclass klass = NULL;
+  ScopedJvmtiPointer classSignature(jvmti_env);
+  ScopedJvmtiPointer classGeneric(jvmti_env);
 
-    err = jvmti_env->GetMethodDeclaringClass(method, &klass);
-    check_jvmti_error(jvmti_env, err, "GetMethodDeclaringClass failed\n");
+  err = jvmti_env->GetMethodDeclaringClass(method, &klass);
+  check_jvmti_error(jvmti_env, err, "GetMethodDeclaringClass failed\n");
+  if (JVMTI_ERROR_NONE != err) {
+    return;
+  }
 
-    err = jvmti_env->GetClassSignature(klass, classSignature.strAddress(), classGeneric.strAddress());
-    check_jvmti_error(jvmti_env, err, "GetClassSignature failed\n");
+  err = jvmti_env->GetClassSignature(klass, classSignature.strAddress(), classGeneric.strAddress());
+  check_jvmti_error(jvmti_env, err, "GetClassSignature failed\n");
+  if (JVMTI_ERROR_NONE != err) {
+    return;
+  }
 
-    fprintf(stderr,"cbNativeMethodBind: %s::%s old (%p) new: (%p)\n",
-      classSignature.str(),
-      methodName.str(),
-      address,
-      *new_address_ptr);
+  fprintf(stderr,"cbNativeMethodBind: %s::%s old (%p) new: (%p)\n",
+    classSignature.str(),
+    methodName.str(),
+    address,
+    *new_address_ptr);
 
 //    fprintf(stderr,"cbNativeMethodBind: %s\n", methodName);
 //
@@ -338,8 +360,6 @@ JNICALL void cbNativeMethodBind
 //      exit_critical_section(jvmti_env);
 //      return;
 //    }
-
-    exit_critical_section(jvmti_env);
 }
 
 
